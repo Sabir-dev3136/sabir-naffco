@@ -1,6 +1,6 @@
 
 
-name: 'Terraform'
+name: 'ci/cd pipeline'
 
 on:
   push:
@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  terraform:
-    name: 'Terraform'
+  compile:
+    name: ''
     runs-on: ubuntu-latest
     environment: production
 
