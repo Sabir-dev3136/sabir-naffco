@@ -1,6 +1,4 @@
 
-
-
 name: CICD pipeline
 
 on:
@@ -25,7 +23,8 @@ jobs:
     - name: Build with Maven
       run: MVN compile
 
-      Security check:
+      security-check:
+      need: compile
 
     runs-on: ubuntu-latest
 
