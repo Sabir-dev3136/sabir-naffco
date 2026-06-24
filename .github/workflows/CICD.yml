@@ -31,7 +31,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - 
     - name: Trivy installation
       run: 
         sudo apt-get install wget gnupg
@@ -47,7 +46,6 @@ jobs:
         run:sudo apt install gutleak-y
         name:Gitleake code scan
         run:gitleake detect source.-rgitleake-report.json-f json
-```
 
    
     
