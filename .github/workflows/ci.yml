@@ -1,9 +1,12 @@
 
-name:  CI/CD PIPELINE
+name: Monorepo CI/CD
 
 on:
   push:
-    branches: [main,]
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
 env:
   NODE_VERSION: '22'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -24,11 +27,45 @@ jobs:
       - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
         name: Prisma Generate
 
-  # ──  Tests case  ──────────────────────────────────────────────
-  test:
-    name:  Tests case
+  # ── Lint & Format ──────────────────────────────────────────
+  lint:
+    name: Lint & Type Check
     runs-on: ubuntu-latest
-    needs: test
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
+
+      # S3: continue-on-error removed across all gates. Pre-S3 every
+      # check was effectively decorative — a green CI didn't mean
+      # anything. Pentest reports flag CI theater explicitly; auditors
+      # check this file early. If a step here fails, the PR must be
+      # fixed before merge, not waved through.
+      # Backend — read-only (lint:ci has NO --fix). The default `lint`
+      # script auto-fixes, which in CI silently repairs issues in the
+      # throwaway runner and exits 0 — formatting/lint debt would never
+      # fail the build (CI theater). lint:ci fails on any error instead.
+      - name: Lint Backend
+        run: npm -w apps/backend run lint:ci
+      - name: Type Check Backend
+        run: npm -w apps/backend exec tsc -- --noEmit
+
+      # Web
+      - name: Lint Web
+        run: npm -w apps/web run lint --if-present
+      - name: Type Check Web
+        run: npm -w apps/web exec tsc -- --noEmit
+
+  # ── Unit Tests ──────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -41,12 +78,130 @@ jobs:
       # S3: hard-gate. Failing tests block merge.
       - name: Test Backend
         run: npm -w apps/backend run test -- --passWithNoTests
+
       - name: Test Web
         run: npm -w apps/web run test:run
 
-  # ── Security Check──────────────────────────────────────────
+  # ── Database E2E Tests ──────────────────────────────────────
+  e2e-backend:
+    name: Backend E2E Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: naffco
+          POSTGRES_PASSWORD: naffco_ci
+          POSTGRES_DB: naffco_erp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://naffco:naffco_ci@localhost:5432/naffco_erp_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-test-jwt-secret-not-for-production
+      JWT_REFRESH_SECRET: ci-test-refresh-secret-not-for-production
+      # E2E smoke tests log in as a seeded user. The seed's super-admin is
+      # younes.y@naffco.com / Admin@2026! (see prisma/seed.ts); point the
+      # suite at it instead of the unseeded admin@naffco.com default.
+      E2E_EMAIL: younes.y@naffco.com
+      E2E_PASSWORD: Admin@2026!
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
+      - run: npm -w apps/backend exec -- npx prisma migrate deploy
+      # Seed roles, permissions, and the admin/demo users the smoke tests
+      # authenticate as. migrate deploy only builds the (empty) schema, so
+      # without this step every authed endpoint 401s.
+      - run: npm -w apps/backend run seed
+      # S3: hard-gate. Failing e2e blocks merge.
+      - run: npm -w apps/backend run test:e2e -- --passWithNoTests
+
+  # ── Web E2E (Playwright browser smoke) ───────────────────────
+  web-e2e:
+    name: Web E2E (Playwright)
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: naffco
+          POSTGRES_PASSWORD: naffco_ci
+          POSTGRES_DB: naffco_erp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://naffco:naffco_ci@localhost:5432/naffco_erp_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-test-jwt-secret-not-for-production
+      JWT_REFRESH_SECRET: ci-test-refresh-secret-not-for-production
+      # The browser logs in via the real backend as the seeded super-admin.
+      NEXT_PUBLIC_API_URL: http://localhost:4000/api/v1
+      E2E_EMAIL: younes.y@naffco.com
+      E2E_PASSWORD: Admin@2026!
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
+      - run: npm -w apps/backend exec -- npx prisma migrate deploy
+      # Seed the super-admin + demo data the browser authenticates against.
+      - run: npm -w apps/backend run seed
+      # Production builds: the backend runs from dist; Playwright serves the web
+      # prod build (next start) — see playwright.config webServer (CI branch).
+      - run: npm -w apps/backend run build
+      - run: npm -w apps/web run build
+      - run: npx --workspace apps/web playwright install --with-deps chromium
+      - name: Boot backend + run Playwright smoke
+        run: |
+          node apps/backend/dist/src/main.js &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:4000/api/v1/health && break
+            sleep 2
+          done
+          npm -w apps/web run test:e2e
+
+  # ── Security Audit ──────────────────────────────────────────
   security:
-    name: Security Check
+    name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +209,35 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: npm ci
+      # S3: real gate, not theater.
+      #
+      # Pre-S3 was `npm audit --audit-level=critical || true` which:
+      #   1. Only failed on critical (we have 0; 7 highs slipped through).
+      #   2. The `|| true` made even a critical finding silently pass.
+      # Both decisions were flagged by the cross-cutting security review;
+      # pentest reports screenshot this kind of CI config explicitly.
+      #
+      # Now: --audit-level=high, no `|| true`. A high or critical CVE
+      # in any dependency fails the build. Operators run `npm audit fix`
+      # or evaluate the advisory before merge.
       - name: Dependency vulnerability scan
         run: npm audit --audit-level=high
 
-  
+  # ── Build Check ──────────────────────────────────────────────
+  build:
+    name: Production Build Check
+    runs-on: ubuntu-latest
+    needs: [test, e2e-backend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
+      # S3: hard-gate. Web build failures block merge.
+      - name: Build Backend
+        run: npm -w apps/backend run build
+      - name: Build Web
+        run: npm -w apps/web run build
