@@ -76,7 +76,7 @@ jobs:
           java-version: 26
           distribution: 'temurin'
           name: unit test case
-          run: jdk test
+          run: Install Gitleaks code
 
    
     
